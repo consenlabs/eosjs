@@ -428,7 +428,8 @@ function WriteApi(Network, network, config, Transaction) {
         const packedTr = {
           compression: 'none',
           transaction: tr,
-          signatures: sigs
+          signatures: sigs,
+          buf: buf,
         }
 
         const mock = config.mockTransactions ? config.mockTransactions() : null
