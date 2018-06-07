@@ -1,14 +1,15 @@
 [![Build Status](https://travis-ci.org/EOSIO/eosjs.svg?branch=master)](https://travis-ci.org/EOSIO/eosjs)
 [![NPM](https://img.shields.io/npm/v/eosjs.svg)](https://www.npmjs.org/package/eosjs)
 
-| Version | [EOSIO/eosjs](/EOSIO/eosjs) | [Npm](https://www.npmjs.com/package/eosjs) | [EOSIO/eos](/EOSIO/eos) | [Docker Hub](https://hub.docker.com/r/eosio/eos/) | Node |
-| --- | --- | --- | --- | --- | --- |
-| dawn4.2 | tag: 13.x.x | `npm install eosjs` (version 13) | tag: dawn-v4.2.0 | eosio/eos:20180526 | [local docker](https://github.com/EOSIO/eosjs/tree/master/docker) |
-| dawn4.1 | tag: 12.x.x | `npm install eosjs` (version 12) | tag: dawn-v4.1.0 | eosio/eos:20180519 | [local docker](https://github.com/EOSIO/eosjs/tree/master/docker) |
-| dawn4 | tag: 11.x.x | `npm install eosjs@dawn4` (version 11) | tag: dawn-v4.0.0 | eosio/eos:dawn-v4.0.0 | [local docker](https://github.com/EOSIO/eosjs/tree/master/docker) |
-| DAWN-2018-04-23-ALPHA | tag: 9.x.x | `npm install eosjs@dawn3` (version 9) | tag: DAWN-2018-04-23-ALPHA | eosio/eos:DAWN-2018-04-23-ALPHA | [local docker](https://github.com/EOSIO/eosjs/tree/DAWN-2018-04-23-ALPHA/docker) |
-| dawn3 | tag: 8.x.x | `npm install eosjs@8` (version 8) | tag: dawn-v3.0.0 | eosio/eos:dawn3x | [local docker](https://github.com/EOSIO/eosjs/tree/master/docker) |
-| dawn2 | branch: dawn2 | `npm install eosjs` | branch: dawn-2.x | eosio/eos:dawn2x | [local docker](https://github.com/EOSIO/eosjs/tree/master/docker) |
+| [EOSIO/eosjs](/EOSIO/eosjs) | [Npm](https://www.npmjs.com/package/eosjs) | [EOSIO/eos](/EOSIO/eos) | [Docker Hub](https://hub.docker.com/r/eosio/eos/) |
+| --- | --- | --- | --- |
+| tag: 14.x.x | `npm install eosjs` (version 14) | tag: v1.0.1 | eosio/eos:v1.0.1 |
+| tag: 13.x.x | `npm install eosjs` (version 13) | tag: dawn-v4.2.0 | eosio/eos:20180526 |
+| tag: 12.x.x | `npm install eosjs` (version 12) | tag: dawn-v4.1.0 | eosio/eos:20180519 |
+| tag: 11.x.x | `npm install eosjs@dawn4` (version 11) | tag: dawn-v4.0.0 | eosio/eos:dawn-v4.0.0 |
+| tag: 9.x.x | `npm install eosjs@dawn3` (version 9) | tag: DAWN-2018-04-23-ALPHA | eosio/eos:DAWN-2018-04-23-ALPHA | [local docker](https://github.com/EOSIO/eosjs/tree/DAWN-2018-04-23-ALPHA/docker) |
+| tag: 8.x.x | `npm install eosjs@8` (version 8) | tag: dawn-v3.0.0 | eosio/eos:dawn3x |
+| branch: dawn2 | `npm install eosjs` | branch: dawn-2.x | eosio/eos:dawn2x |
 
 # Eosjs
 
@@ -19,7 +20,7 @@ General purpose library for the EOS blockchain.
 ```javascript
 Eos = require('eosjs') // Eos = require('./src')
 
-eos = Eos.Localnet() // 127.0.0.1:8888
+eos = Eos() // 127.0.0.1:8888
 
 // All API methods print help when called with no-arguments.
 eos.getBlock()
@@ -39,7 +40,6 @@ eos.getBlock({block_num_or_id: 1}, callback)
 
 // Provide an empty object or a callback if an API call has no arguments
 eos.getInfo({}).then(result => {console.log(result)})
-
 ```
 
 API methods and documentation are generated from:
@@ -53,6 +53,7 @@ Eos = require('eosjs') // Eos = require('./src')
 
 // Optional configuration..
 config = {
+  chainId: null, // 32 byte (64 char) hex string
   keyProvider: ['PrivateKeys...'], // WIF string or array of keys..
   httpEndpoint: 'http://127.0.0.1:8888',
   mockTransactions: () => 'pass', // or 'fail'
@@ -61,12 +62,16 @@ config = {
   },
   expireInSeconds: 60,
   broadcast: true,
-  debug: false,
+  debug: false, // API and transactions
   sign: true
 }
 
-eos = Eos.Localnet(config)
+eos = Eos(config)
 ```
+
+* **chainId** - Unique ID for the blockchain your connecting too.  This is
+  required for valid transaction signing.  The chainId is provided via the
+  [get_info](http://ayeaye.cypherglass.com:8888/v1/chain/get_info) API call.
 
 * `mockTransactions` (optional)
   * `pass` - do not broadcast, always pretend that the transaction worked
@@ -102,12 +107,12 @@ options = {
 
 ### Usage (read/write)
 
-If you use the Testnet, you'll need to replace the private key in keyProvider.
+You'll need to provide the private key in keyProvider.
 
 ```javascript
 Eos = require('eosjs') // Eos = require('./src')
 
-eos = Eos.Localnet({keyProvider: '5KQwrPbwdL6PhXujxW37FSSQZ1JiwsST4cqQzDeyXtP79zkvFD3'})
+eos = Eos({keyProvider: '5KQwrPbwdL6PhXujxW37FSSQZ1JiwsST4cqQzDeyXtP79zkvFD3'})
 
 // Run with no arguments to print usage.
 eos.transfer()
@@ -148,7 +153,7 @@ Eos = require('eosjs') // Eos = require('./src')
 wif = '5KQwrPbwdL6PhXujxW37FSSQZ1JiwsST4cqQzDeyXtP79zkvFD3'
 pubkey = 'EOS6MRyAjQq8ud7hVNYcfnVPJqcVpscN5So8BhtHuGYqET5GDW5CV'
 
-eos = Eos.Localnet({keyProvider: wif})
+eos = Eos({keyProvider: wif})
 
 eos.transaction(tr => {
   tr.newaccount({
@@ -195,7 +200,7 @@ Import and include the library when you configure Eos:
 
 ```javascript
 binaryen = require('binaryen')
-eos = Eos.Localnet({..., binaryen})
+eos = Eos({..., binaryen})
 ```
 
 Complete example:
@@ -210,9 +215,9 @@ keyProvider = '5KQwrPbwdL6PhXujxW37FSSQZ1JiwsST4cqQzDeyXtP79zkvFD3'
 //
 // $ npm install binaryen@37.0.0
 // binaryen = require('binaryen')
-// eos = Eos.Localnet({keyProvider, binaryen})
+// eos = Eos({keyProvider, binaryen})
 
-eos = Eos.Localnet({keyProvider})
+eos = Eos({keyProvider})
 
 wasm = fs.readFileSync(`docker/contracts/eosio.token/eosio.token.wasm`)
 abi = fs.readFileSync(`docker/contracts/eosio.token/eosio.token.abi`)
@@ -238,7 +243,7 @@ keyProvider = [
   Eos.modules.ecc.seedPrivate('currency')
 ]
 
-eos = Eos.Localnet({keyProvider})
+eos = Eos({keyProvider})
 
 // if either transfer fails, both will fail (1 transaction, 2 messages)
 eos.transaction(eos =>
@@ -283,7 +288,7 @@ A manual transaction provides for more flexibility.
 ```javascript
 Eos = require('eosjs') // Eos = require('./src')
 
-eos = Eos.Localnet({keyProvider: '5KQwrPbwdL6PhXujxW37FSSQZ1JiwsST4cqQzDeyXtP79zkvFD3'})
+eos = Eos({keyProvider: '5KQwrPbwdL6PhXujxW37FSSQZ1JiwsST4cqQzDeyXtP79zkvFD3'})
 
 // returns Promise
 eos.transaction({
@@ -319,27 +324,24 @@ import from `./src` instead.
 
 ```javascript
 Eos = require('./src')
-
-// Creating the instance `eos` means that common blockchain data-structures are
-// available for a given network (Testnet, Mainnet, etc).
-eos = Eos.Localnet()
+eos = Eos()
 ```
 
 * Fcbuffer
 
-The `eos` instance can provide more convenient serialization:
+The `eos` instance can provide serialization:
 
 ```javascript
-// 'nonce' is a struct but could be any type or struct like: uint8 or transaction
-nonce = {value: '..'}
-nonceBuffer = eos.fc.toBuffer('nonce', nonce)
-assert.deepEqual(nonce, eos.fc.fromBuffer('nonce', nonceBuffer))
+// 'asset' is a type but could be any struct or type like: transaction or uint8
+type = {type: 1, data: '00ff'}
+buffer = eos.fc.toBuffer('extensions_type', type)
+assert.deepEqual(type, eos.fc.fromBuffer('extensions_type', buffer))
 
-// Serialization for a smart-contract's Abi:
-eos.contract('currency', (error, c) => currency = c)
-issue = {to: 'inita', quantity: '1.0000 CUR', memo: 'memo'}
-issueBuffer = currency.fc.toBuffer('issue', issue)
-assert.deepEqual(issue, currency.fc.fromBuffer('issue', issueBuffer))
+// ABI Serialization
+eos.contract('eosio.token', (error, c) => eosio_token = c)
+create = {issuer: 'inita', maximum_supply: '1.0000 SYS'}
+buffer = eosio_token.fc.toBuffer('create', create)
+assert.deepEqual(create, eosio_token.fc.fromBuffer('create', buffer))
 ```
 
 Use Node v8+ to `package-lock.json`.
@@ -351,7 +353,7 @@ need to use them directly.  They are exported here giving more API access or
 in some cases may be used standalone.
 
 ```javascript
-var {api, ecc, json, Fcbuffer, format} = Eos.modules
+var {format, api, ecc, json, Fcbuffer} = Eos.modules
 ```
 * format [./format.md](./docs/format.md)
   * Blockchain name validation
@@ -387,13 +389,16 @@ git clone https://github.com/EOSIO/eosjs.git
 cd eosjs
 npm install
 npm run build_browser
-# builds: ./dist/eos.js
+# builds: ./dist/eos.js load with ./dist/index.html
+
+npm run build_browser_test
+# builds: ./dist/test.js run with ./dist/test.html
 ```
 
 ```html
 <script src="eos.js"></script>
 <script>
-var eos = Eos.Testnet()
+var eos = Eos()
 //...
 </script>
 ```

@@ -13,7 +13,7 @@ module.exports = {
   UDecimalPad,
   UDecimalImply,
   UDecimalUnimply,
-  parseAssetSymbol
+  parseExtendedAsset
 }
 
 function ULong(value, unsigned = true, radix = 10) {
@@ -64,6 +64,7 @@ const charidx = ch => {
   @see types.hpp string_to_name
 
   @arg {string} name - A string to encode, up to 12 characters long.
+
   @return {string<uint64>} - compressed string (from name arg).  A string is
     always used because a number could exceed JavaScript's 52 bit limit.
 */
@@ -71,8 +72,8 @@ function encodeName(name, littleEndian = true) {
   if(typeof name !== 'string')
     throw new TypeError('name parameter is a required string')
 
-  if(name.length > 13)
-    throw new TypeError('A name can be up to 13 characters long')
+  if(name.length > 12)
+    throw new TypeError('A name can be up to 12 characters long')
 
   let bitstr = ''
   for(let i = 0; i <= 12; i++) { // process all 64 bits (even if name is short)
@@ -151,7 +152,6 @@ function UDecimalString(value) {
   assert(value != null, 'value is required')
   value = value === 'object' && value.toString ? value.toString() : String(value)
 
-
   if(value[0] === '.') {
     value = `0${value}`
   }
@@ -191,7 +191,8 @@ function UDecimalPad(num, precision) {
   if(precision == null) {
     return num
   }
-  assert.equal('number', typeof precision, 'precision')
+
+  assert(precision >= 0 && precision <= 18, `Precision should be 18 characters or less`)
 
   const part = value.split('.')
 
@@ -226,6 +227,7 @@ function UDecimalUnimply(value, precision) {
   value = value === 'object' && value.toString ? value.toString() : String(value)
   assert(/^\d+$/.test(value), `invalid whole number ${value}`)
   assert(precision != null, 'precision required')
+  assert(precision >= 0 && precision <= 18, `Precision should be 18 characters or less`)
 
   // Ensure minimum length
   const pad = precision - value.length
@@ -239,40 +241,42 @@ function UDecimalUnimply(value, precision) {
 }
 
 /**
-  @arg {string} assetSymbol - 4,SYS
-  @arg {number} [precision = null] - expected precision or mismatch AssertionError
+  Attempts to parse all forms of the asset strings (symbol, asset, or extended
+  versions).  If the provided string contains any additional or appears to have
+  invalid information an error is thrown.
 
-  @example assert.deepEqual(parseAssetSymbol('SYS'), {precision: null, symbol: 'SYS'})
-  @example assert.deepEqual(parseAssetSymbol('4,SYS'), {precision: 4, symbol: 'SYS'})
+  @return {object} {amount, precision, symbol, contract}
   @throws AssertionError
-  @throws TypeError
 */
-function parseAssetSymbol(assetSymbol, precision = null) {
-  assert.equal(typeof assetSymbol, 'string', 'Asset symbol should be string')
+function parseExtendedAsset(str) {
+  const [amountRaw] = str.split(' ')
+  const amountMatch = amountRaw.match(/^([0-9]+(\.[0-9]+)?)( |$)/)
+  const amount = amountMatch ? amountMatch[1] : null
 
-  if(assetSymbol.indexOf(',') === -1) {
-    assetSymbol = `,${assetSymbol}` // null precision
-  }
-  const v = assetSymbol.split(',')
-  assert(v.length === 2, `Asset symbol "${assetSymbol}" may have a precision like this: 4,SYS`)
+  const precisionMatch = str.match(/(^| )([0-9]+),([A-Z]+)(@|$)/)
+  const precision = precisionMatch ? Number(precisionMatch[2]) : null
 
-  const symbolPrecision = v[0] == '' ? null : parseInt(v[0])
-  const [symbol] = v[1].split('@') // remove contract (if exists)
+  const symbolMatch = str.match(/(^| |,)([A-Z]+)(@|$)/)
+  const symbol = symbolMatch ? symbolMatch[2] : null
+
+  const [, contractRaw] = str.split('@')
+  const contract = /^[a-z0-5]+(\.[a-z0-5]+)*$/.test(contractRaw) ? contractRaw : null
+
+  const join = (e1, e2) => e1 == null ? '' : e2 == null ? '' : e1 + e2
+  const asset = join(precision, ',') + symbol
+  const check = join(amount, ' ') + asset + join('@', contract)
+  assert.equal(str, check,  `Invalid extended asset string: ${str} !== ${check}`)
 
   if(precision != null) {
-    assert.equal(precision, symbolPrecision, 'Asset symbol precision mismatch')
-  } else {
-    precision = symbolPrecision
+    assert(precision >= 0 && precision <= 18, `Precision should be 18 characters or less`)
+  }
+  if(symbol != null) {
+    assert(symbol.length <= 7, `Asset symbol is 7 characters or less`)
+  }
+  if(contract != null) {
+    assert(contract.length <= 12, `Contract is 12 characters or less`)
   }
 
-  if(precision != null) {
-    assert.equal(typeof precision, 'number', 'precision')
-    assert(precision > -1, 'precision must be positive')
-  }
-
-  assert(/^[A-Z]+$/.test(symbol), `Asset symbol should contain only uppercase letters A-Z: ` + symbol)
-  assert(precision <= 18, `Precision should be 18 characters or less`)
-  assert(symbol.length <= 7, `Asset symbol is 7 characters or less`)
-
-  return {precision, symbol}
+  const extendedAsset = join(symbol, '') + join('@', contract)
+  return {amount, precision, symbol, contract}
 }
