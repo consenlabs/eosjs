@@ -4,15 +4,15 @@ const Fcbuffer = require('fcbuffer')
 const ByteBuffer = require('bytebuffer')
 
 const Eos = require('.')
-const AssetCache = require('./asset-cache')
 
 describe('shorthand', () => {
 
-  it('authority', () => {
-    const eos = Eos()
-    const {authority} = eos.fc.structs
+  it('authority', async () => {
+    const eos = Eos({keyPrefix: 'PUB'})
+    const eosio = await eos.contract('eosio')
+    const {authority} = eosio.fc.structs
 
-    const pubkey = 'EOS6MRyAjQq8ud7hVNYcfnVPJqcVpscN5So8BhtHuGYqET5GDW5CV'
+    const pubkey = 'PUB6MRyAjQq8ud7hVNYcfnVPJqcVpscN5So8BhtHuGYqET5GDW5CV'
     const auth = {threshold: 1, keys: [{key: pubkey, weight: 1}]}
 
     assert.deepEqual(authority.fromObject(pubkey), auth)
@@ -22,9 +22,10 @@ describe('shorthand', () => {
     )
   })
 
-  it('PublicKey sorting', () => {
+  it('PublicKey sorting', async () => {
     const eos = Eos()
-    const {authority} = eos.fc.structs
+    const eosio = await eos.contract('eosio')
+    const {authority} = eosio.fc.structs
 
     const pubkeys = [
       'EOS7wBGPvBgRVa4wQN2zm5CjgBF6S7tP7R3JavtSa2unHUoVQGhey',
@@ -46,10 +47,10 @@ describe('shorthand', () => {
   })
 
   it('public_key', () => {
-    const eos = Eos()
+    const eos = Eos({keyPrefix: 'PUB'})
     const {structs, types} = eos.fc
     const PublicKeyType = types.public_key()
-    const pubkey = 'EOS6MRyAjQq8ud7hVNYcfnVPJqcVpscN5So8BhtHuGYqET5GDW5CV'
+    const pubkey = 'PUB6MRyAjQq8ud7hVNYcfnVPJqcVpscN5So8BhtHuGYqET5GDW5CV'
     // 02c0ded2bc1f1305fb0faac5e6c03ee3a1924234985427b6167ca569d13df435cf
     assertSerializer(PublicKeyType, pubkey)
   })
@@ -58,29 +59,34 @@ describe('shorthand', () => {
     const eos = Eos()
     const {types} = eos.fc
     const Symbol = types.symbol()
-
     assertSerializer(Symbol, '4,SYS', '4,SYS', 'SYS')
+  })
+
+  it('symbol_code', () => {
+    const eos = Eos({defaults: true})
+    const {types} = eos.fc
+    const SymbolCode = types.symbol_code()
+    assertSerializer(SymbolCode, SymbolCode.toObject())
   })
 
   it('extended_symbol', () => {
     const eos = Eos({defaults: true})
     const esType = eos.fc.types.extended_symbol()
-    const esString = esType.toObject()
-    assertSerializer(esType, esString)
+    // const esString = esType.toObject()
+    assertSerializer(esType, '4,SYS@contract')
   })
 
   it('asset', () => {
     const eos = Eos()
     const {types} = eos.fc
-    const AssetType = types.asset()
-    assertSerializer(AssetType, '1.1 4,SYS@eosio.token', '1.1000 SYS@eosio.token', '1.1000 SYS')
+    const aType = types.asset()
+    assertSerializer(aType, '1.0001 SYS')
   })
 
   it('extended_asset', () => {
     const eos = Eos({defaults: true})
     const eaType = eos.fc.types.extended_asset()
-    const eaString = eaType.toObject()
-    assertSerializer(eaType, eaString)
+    assertSerializer(eaType, eaType.toObject())
   })
 
   it('signature', () => {
@@ -94,11 +100,10 @@ describe('shorthand', () => {
 
 })
 
-if(process.env['NODE_ENV'] === 'development') {
+describe('Eosio Abi', () => {
 
-  describe('Eosio Abi', () => {
-
-    it('Eosio token contract parses', (done) => {
+  function checkContract(name) {
+    it(`${name} contract parses`, (done) => {
       const eos = Eos()
 
       eos.contract('eosio.token', (error, eosio_token) => {
@@ -108,9 +113,32 @@ if(process.env['NODE_ENV'] === 'development') {
         done()
       })
     })
+  }
+  checkContract('eosio')
+  checkContract('eosio.token')
 
+  it('abi', async () => {
+    const eos = Eos({defaults: true, broadcast: false, sign: false})
+
+    const {abi_def} = eos.fc.structs
+
+    async function setabi(abi) {
+      await eos.setabi('inita', abi) // See README
+      const buf = eos.fc.toBuffer('abi_def', abi)
+      await eos.setabi('inita', buf) // v1/chain/abi_json_to_bin
+      await eos.setabi('inita', buf.toString('hex')) // v1/chain/abi_json_to_bin
+    }
+
+    const obj = abi_def.toObject()
+    const json = JSON.stringify(obj)
+
+    await setabi(obj)
+    await setabi(abi_def.fromObject(obj))
+    await setabi(abi_def.fromObject(json))
+    await setabi(abi_def.fromObject(Buffer.from(json).toString('hex')))
+    await setabi(abi_def.fromObject(Buffer.from(json)))
   })
-}
+})
 
 describe('Action.data', () => {
   it('json', () => {
@@ -147,7 +175,7 @@ describe('Action.data', () => {
     assertSerializer(structs.action, value, value)
   })
 
-  it('unknown type', () => {
+  it('unknown action', () => {
     const eos = Eos({forceActionDataHex: false})
     const {structs, types} = eos.fc
     const value = {
@@ -156,7 +184,10 @@ describe('Action.data', () => {
       data: '030a0b0c',
       authorization: []
     }
-    assertSerializer(structs.action, value)
+    assert.throws(
+      () => assertSerializer(structs.action, value),
+      /Missing ABI action/
+    )
   })
 })
 

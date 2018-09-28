@@ -4,48 +4,55 @@ const Fcbuffer = require('fcbuffer')
 const createHash = require('create-hash')
 const {processArgs} = require('eosjs-api')
 const Structs = require('./structs')
-const AssetCache = require('./asset-cache')
 
 module.exports = writeApiGen
 
 const {sign} = ecc
 
-function writeApiGen(Network, network, structs, config, schemaDef) {
+function writeApiGen(Network, network, structs, config, abis) {
   if(typeof config.chainId !== 'string') {
     throw new TypeError('config.chainId is required')
   }
-
   const writeApi = WriteApi(Network, network, config, structs.transaction)
   const reserveFunctions = new Set(['transaction', 'contract'])
-  const merge = {}
 
-  // sends transactions, also a action collecting wrapper functions
+  const merge = {}
+  // sends transactions, can act as an action collecting wrapper
   merge.transaction = writeApi.genTransaction(structs, merge)
 
   // Immediate send operations automatically calls merge.transaction
-  for(let type in schemaDef) {
-    const schema = schemaDef[type]
-    if(schema.action == null) {
-      continue
-    }
-    const actionName = schema.action.name
-    if(reserveFunctions.has(actionName)) {
-      throw new TypeError('Conflicting Api function: ' + type)
-    }
+  for(const abi of abis) {
+    for(const type in abi.schema) {
+      const typeStruct = abi.schema[type]
+      if(typeof typeStruct === 'string') {
+        // skip types like; name, account_name, etc..
+        continue
+      }
 
-    const struct = structs[type]
-    if(struct == null) {
-      continue
+      assert.equal(typeof typeStruct, 'object', `abi.schema[type = ${type}]`)
+
+      const {action} = typeStruct
+      if(action === undefined) {
+        // ABI private struct
+        continue
+      }
+
+      if(reserveFunctions.has(action.name)) {
+        throw new TypeError('Conflicting Api function: ' + type)
+      }
+
+      const definition = schemaFields(abi.schema, type)
+      merge[action.name] = writeApi.genMethod(
+        type, definition, merge.transaction, action.account, action.name
+      )
     }
-    const definition = schemaFields(schemaDef, type)
-    merge[actionName] = writeApi.genMethod(type, definition, merge.transaction, schema.action.account)
   }
 
   /**
     Immedate send contract actions.
 
     @example eos.contract('mycontract', [options], [callback])
-    @example eos.contract('mycontract').then(mycontract => mycontract.action(...))
+    @example eos.contract('mycontract').then(mycontract => mycontract.myaction(...))
   */
   merge.contract = (...args) => {
     const {params, options, returnPromise, callback} =
@@ -86,16 +93,19 @@ function WriteApi(Network, network, config, Transaction) {
     } else if(typeof args[0] === 'string') {
       contracts = [args[0]]
       args = args.slice(1)
-    } else if(typeof args[0] === 'object' && typeof Array.isArray(args[0].actions)) {
+    } else if(typeof args[0] === 'object' && Array.isArray(args[0].actions)) {
       // full transaction, lookup ABIs used by each action
       const accounts = new Set() // make a unique list
+
+      // TODO: Add args[0].context_free_actions to accounts too?
       for(const action of args[0].actions) {
         accounts.add(action.account)
       }
 
       const abiPromises = []
+
       // Eos contract operations are cached (efficient and offline transactions)
-      const cachedCode = new Set(['eosio', 'eosio.token'])
+      const cachedCode = new Set(['eosio', 'eosio.token', 'eosio.null'])
       accounts.forEach(account => {
         if(!cachedCode.has(account)) {
           abiPromises.push(config.abiCache.abiAsync(account))
@@ -167,7 +177,7 @@ function WriteApi(Network, network, config, Transaction) {
   function genMethod(type, definition, transactionArg, account = 'eosio.token', name = type) {
     return function (...args) {
       if (args.length === 0) {
-        console.error(usage(type, definition, Network, account, config))
+        console.log(usage({name, type}, definition, Network, account, config))
         return
       }
 
@@ -196,23 +206,47 @@ function WriteApi(Network, network, config, Transaction) {
         throw new Error('Callback during a transaction are not supported')
       }
 
-      const addDefaultAuths = options.authorization == null
-
       const authorization = []
-      if(options.authorization) {
-        if(typeof options.authorization === 'string') {
-          options.authorization = [options.authorization]
+      const providedAuth = options.authorization ? options.authorization : config.authorization
+      const addDefaultAuths = providedAuth == null
+
+      // Often if the first field in an action is an account name it is
+      // also the required authorization.
+      function firstAccount() {
+        const fieldKeys = Object.keys(definition)
+        const f1 = fieldKeys[0]
+
+        if(definition[f1] === 'account_name') {
+          return params[f1]
         }
-        options.authorization.forEach(auth => {
-          if(typeof auth === 'string') {
-            const [actor, permission = 'active'] = auth.split('@')
-            authorization.push({actor, permission})
-          } else if(typeof auth === 'object') {
-            authorization.push(auth)
-          }
-        })
-        assert.equal(authorization.length, options.authorization.length,
-          'invalid authorization in: ' + JSON.stringify(options.authorization))
+      }
+
+      if(providedAuth) {
+        let authArray
+        if(typeof providedAuth === 'string') {
+          authArray = [providedAuth]
+        } else if(Array.isArray(providedAuth)) {
+          authArray = providedAuth
+        }
+
+        if(authArray) {
+          authArray.forEach(auth => {
+            if(typeof auth === 'string') {
+              let [actor, permission = 'active'] = auth.split('@')
+              if(actor === '') {
+                actor = firstAccount()
+              }
+              if(actor) {
+                authorization.push({actor, permission})
+              }
+            } else if(typeof auth === 'object') {
+              authorization.push(auth)
+            }
+          })
+        }
+
+        assert.equal(authorization.length, authArray.length,
+          'invalid authorization in: ' + JSON.stringify(providedAuth))
       }
 
       const tr = {
@@ -225,13 +259,11 @@ function WriteApi(Network, network, config, Transaction) {
       }
 
       if(addDefaultAuths) {
-        const fieldKeys = Object.keys(definition)
-        const f1 = fieldKeys[0]
-
-        if(definition[f1] === 'account_name') {
+        const actor = firstAccount()
+        if(actor) {
           // Default authorization (since user did not provide one)
           tr.actions[0].authorization.push({
-            actor: params[f1],
+            actor,
             permission: 'active'
           })
         }
@@ -328,7 +360,7 @@ function WriteApi(Network, network, config, Transaction) {
     )
   }
 
-  function transaction(arg, options, callback) {
+  async function transaction(arg, options, callback) {
     const defaultExpiration = config.expireInSeconds ? config.expireInSeconds : 60
     const optionDefault = {expireInSeconds: defaultExpiration, broadcast: true, sign: true}
     options = Object.assign({}/*clone*/, optionDefault, options)
@@ -354,14 +386,15 @@ function WriteApi(Network, network, config, Transaction) {
       throw new TypeError('Expecting actions array')
     }
 
-    if(config.transactionLog) {
+    if(config.logger.log || config.logger.error) {
       // wrap the callback with the logger
       const superCallback = callback
       callback = (error, tr) => {
-        if(error) {
-          config.transactionLog(error)
-        } else {
-          config.transactionLog(null, tr)
+        if(error && config.logger.error) {
+          config.logger.error(error)
+        }
+        if(config.logger.log){
+          config.logger.log(JSON.stringify(tr))
         }
         superCallback(error, tr)
       }
@@ -377,109 +410,181 @@ function WriteApi(Network, network, config, Transaction) {
       throw new TypeError('Expecting config.signProvider function (disable using {sign: false})')
     }
 
-    const headers = config.transactionHeaders ?
-      config.transactionHeaders :
-      network.createTransaction
+    const rawTx = {
+      max_net_usage_words: 0,
+      max_cpu_usage_ms: 0,
+      delay_sec: 0,
+      context_free_actions: [],
+      actions: [],
+      signatures: [],
+      transaction_extensions: []
+    }
 
-    headers(options.expireInSeconds, checkError(callback, async function(rawTx) {
-      // console.log('rawTx', rawTx)
-      assert.equal(typeof rawTx, 'object', 'expecting transaction header object')
-      assert.equal(typeof rawTx.expiration, 'string', 'expecting expiration: iso date time string')
-      assert.equal(typeof rawTx.ref_block_num, 'number', 'expecting ref_block_num number')
-      assert.equal(typeof rawTx.ref_block_prefix, 'number', 'expecting ref_block_prefix number')
+    // global transaction headers
+    if(config.transactionHeaders) {
+      if(typeof config.transactionHeaders === 'object') {
+        Object.assign(rawTx, config.transactionHeaders)
+      } else if(typeof config.transactionHeaders === 'function') {
+        await config.transactionHeaders(
+          options.expireInSeconds,
+          checkError(callback, config.logger, async function(headers) {
+            assert.equal(typeof headers, 'object', 'expecting transaction header object')
+            Object.assign(rawTx, headers)
+          })
+        )
+      } else {
+        assert(false, 'config.transactionHeaders should be an object or function')
+      }
+    }
 
-      rawTx = Object.assign({}, rawTx)
 
-      rawTx.actions = arg.actions
+    // per transaction headers
+    for(const txField of [
+      'expiration', 'ref_block_num', 'ref_block_prefix',
+      'delay_sec', 'max_net_usage_words', 'max_cpu_usage_ms'
+    ]) {
+      if(arg[txField] !== undefined) {
+        // eos.transaction('eosio', eosio => { eosio.myaction(..) }, {delay_sec: 369})
+        // eos.transaction({delay_sec: 369, actions: [...]})
+        rawTx[txField] = arg[txField]
+      } else if(options[txField] !== undefined) {
+        // eos.transaction(tr => {tr.transfer(...)}, {delay_sec: 369})
+        rawTx[txField] = options[txField]
+      }
+    }
 
-      // Resolve shorthand, queue requests
-      let txObject = Transaction.fromObject(rawTx)
+    // eosjs calcualted headers
+    if( // minimum required headers
+      rawTx.expiration === undefined ||
+      rawTx.ref_block_num === undefined ||
+      rawTx.ref_block_prefix === undefined
+    ) {
+      assert(network, 'Network is required, provide httpEndpoint or own transaction headers')
+      await new Promise(resolve => {
+        network.createTransaction(
+          options.expireInSeconds,
+          checkError(callback, config.logger, async function(headers) {
+            for(const txField of [ 'expiration', 'ref_block_num', 'ref_block_prefix']) {
+              // console.log(txField, headers[txField]);
+              if(rawTx[txField] === undefined) {
+                rawTx[txField] = headers[txField]
+              }
+            }
+            resolve()
+          })
+        )
+      })
+    }
 
-      // After fromObject ensure any async actions are finished
-      if(AssetCache.pending()) {
-        await AssetCache.resolve()
+    // console.log('rawTx', rawTx)
 
-        // Create the object again with resolved data
-        txObject = Transaction.fromObject(rawTx)
+    assert.equal(typeof rawTx.expiration, 'string', 'expecting expiration: iso date time string')
+    assert.equal(typeof rawTx.ref_block_num, 'number', 'expecting ref_block_num number')
+    assert.equal(typeof rawTx.ref_block_prefix, 'number', 'expecting ref_block_prefix number')
+
+    rawTx.context_free_actions = arg.context_free_actions
+    rawTx.actions = arg.actions
+    rawTx.transaction_extensions = arg.transaction_extensions
+
+    // Resolve shorthand
+    const txObject = Transaction.fromObject(rawTx)
+    // console.log('txObject', txObject)
+
+    const buf = Fcbuffer.toBuffer(Transaction, txObject)
+    const tr = Transaction.toObject(txObject)
+
+    const transactionId  = createHash('sha256').update(buf).digest().toString('hex')
+
+    let sigs = []
+    if(options.sign){
+      const chainIdBuf = Buffer.from(config.chainId, 'hex')
+      const packedContextFreeData = Buffer.from(new Uint8Array(32)) // TODO
+      const signBuf = Buffer.concat([chainIdBuf, buf, packedContextFreeData])
+      sigs = config.signProvider({transaction: tr, buf: signBuf, sign,
+        optionsKeyProvider: options.keyProvider})
+
+      if(!Array.isArray(sigs)) {
+        sigs = [sigs]
+      }
+    }
+
+    // sigs can be strings or Promises
+    Promise.all(sigs).then(sigs => {
+      sigs = [].concat.apply([], sigs) // flatten arrays in array
+
+      for(let i = 0; i < sigs.length; i++) {
+        const sig = sigs[i]
+        // normalize (hex to base58 format for example)
+        if(typeof sig === 'string' && sig.length === 130) {
+          sigs[i] = ecc.Signature.from(sig).toString()
+        }
       }
 
-      const buf = Fcbuffer.toBuffer(Transaction, txObject)
-      const tr = Transaction.toObject(txObject)
-
-      const transactionId  = createHash('sha256').update(buf).digest().toString('hex')
-
-      let sigs = []
-      if(options.sign){
-        const chainIdBuf = new Buffer(config.chainId, 'hex')
-        const signBuf = Buffer.concat([chainIdBuf, buf, new Buffer(new Uint8Array(32))])
-        sigs = config.signProvider({transaction: tr, buf: signBuf, sign})
-        if(!Array.isArray(sigs)) {
-          sigs = [sigs]
-        }
+      const packedTr = {
+        compression: 'none',
+        transaction: tr,
+        signatures: sigs
       }
 
-      // sigs can be strings or Promises
-      Promise.all(sigs).then(sigs => {
-        sigs = [].concat.apply([], sigs) // flatten arrays in array
-
-        for(let i = 0; i < sigs.length; i++) {
-          const sig = sigs[i]
-          // normalize (hex to base58 format for example)
-          if(typeof sig === 'string' && sig.length === 130) {
-            sigs[i] = ecc.Signature.from(sig).toString()
-          }
-        }
-
-        const packedTr = {
-          compression: 'none',
-          transaction: tr,
-          signatures: sigs,
-          buf: buf,
-        }
-
-        const mock = config.mockTransactions ? config.mockTransactions() : null
-        if(mock != null) {
-          assert(/pass|fail/.test(mock), 'mockTransactions should return a string: pass or fail')
-          if(mock === 'pass') {
-            callback(null, {
-              transaction_id: transactionId,
-              mockTransaction: true,
-              broadcast: false,
-              transaction: packedTr
-            })
-          }
-          if(mock === 'fail') {
-            console.error(`[push_transaction mock error] 'fake error', digest '${buf.toString('hex')}'`)
-            callback('fake error')
-          }
-          return
-        }
-
-        if(!options.broadcast) {
+      const mock = config.mockTransactions ? config.mockTransactions() : null
+      if(mock != null) {
+        assert(/pass|fail/.test(mock), 'mockTransactions should return a string: pass or fail')
+        if(mock === 'pass') {
           callback(null, {
             transaction_id: transactionId,
+            mockTransaction: true,
             broadcast: false,
             transaction: packedTr
           })
-        } else {
-          network.pushTransaction(packedTr, error => {
-            if(!error) {
-              callback(null, {
-                transaction_id: transactionId,
-                broadcast: true,
-                transaction: packedTr
-              })
-            } else {
-              console.error(`[push_transaction error] '${error.message}', transaction '${buf.toString('hex')}'`)
-              callback(error.message)
-            }
-          })
         }
-      }).catch(error => {
-        console.error(error)
-        callback(error)
-      })
-    }))
+        if(mock === 'fail') {
+          const error = `[push_transaction mock error] 'fake error', digest '${buf.toString('hex')}'`
+
+          if(config.logger.error) {
+            config.logger.error(error)
+          }
+
+          callback(error)
+        }
+        return
+      }
+
+      if(!options.broadcast || !network) {
+        callback(null, {
+          transaction_id: transactionId,
+          broadcast: false,
+          transaction: packedTr
+        })
+      } else {
+        network.pushTransaction(packedTr, (error, processedTransaction) => {
+          if(!error) {
+            callback(
+              null,
+              Object.assign(
+                {
+                  broadcast: true,
+                  transaction: packedTr,
+                  transaction_id: transactionId
+                },
+                processedTransaction
+              )
+            )
+          } else {
+            if(config.logger.error) {
+              config.logger.error(
+                `[push_transaction error] '${error.message}', transaction '${buf.toString('hex')}'`
+              )
+            }
+            callback(error.message)
+          }
+        })
+      }
+    }).catch(error => {
+      if(config.logger.error) {
+        config.logger.error(error)
+      }
+      callback(error)
+    })
     return returnPromise
   }
 
@@ -505,7 +610,7 @@ const optionsFormatter = option => {
   }
 }
 
-function usage (type, definition, Network, account, config) {
+function usage(action, definition, Network, account, config) {
   let usage = ''
   const out = (str = '') => {
     usage += str + '\n'
@@ -514,46 +619,29 @@ function usage (type, definition, Network, account, config) {
   out(account)
   out()
 
-  out('FUNCTION')
-  out(type)
+  out('ACTION')
+  out(action.name)
   out()
 
-  let struct
-  if(account === 'eosio' || account === 'eosio.token') {
-    const {structs} = Structs(
-      Object.assign(
-        {defaults: true, network: Network},
-        config
-      )
-    )
-    struct = structs[type]
+  const cache = config.abiCache.abi(account)
 
-    out('PARAMETERS')
-    out(JSON.stringify(definition, null, 4))
-    out()
+  out('PARAMETERS')
+  out(JSON.stringify(schemaFields(cache.schema, action.type), null, 4))
+  out()
 
-    out('EXAMPLE')
-    out(JSON.stringify(struct.toObject(), null, 4))
+  const struct = cache.structs[action.type]
 
-  } else {
-    const cache = config.abiCache.abi(account)
-    out('PARAMETERS')
-    out(JSON.stringify(schemaFields(cache.schema, type), null, 4))
-    out()
+  out('EXAMPLE')
+  out(`${account}.${action.name}(${JSON.stringify(struct.toObject(), null, 4)})`)
 
-    struct = cache.structs[type]
-    out('EXAMPLE')
-    out(JSON.stringify(struct.toObject(), null, 4))
-  }
-  if(struct == null) {
-    throw TypeError('Unknown type: ' + type)
-  }
   return usage
 }
 
-const checkError = (parentErr, parrentRes) => (error, result) => {
+const checkError = (parentErr, logger, parrentRes) => (error, result) => {
   if (error) {
-    console.log('error', error)
+    if(logger.error) {
+      logger.error('error', error)
+    }
     parentErr(error)
   } else {
     Promise.resolve(parrentRes(result)).catch(error => {
@@ -562,6 +650,7 @@ const checkError = (parentErr, parrentRes) => (error, result) => {
   }
 }
 
+/** Collapse inheritance (via "base") putting all the fields in one object. */
 function schemaFields(schema, type) {
   const {base, fields} = schema[type]
   const def = {}

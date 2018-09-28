@@ -1,11 +1,3 @@
-try {
-  require("babel-polyfill");
-} catch(e) {
-  if(e.message.indexOf('only one instance of babel-polyfill is allowed') === -1) {
-    console.error(e)
-  }
-}
-
 const ecc = require('eosjs-ecc')
 const Fcbuffer = require('fcbuffer')
 const EosApi = require('eosjs-api')
@@ -13,36 +5,46 @@ const assert = require('assert')
 
 const Structs = require('./structs')
 const AbiCache = require('./abi-cache')
-const AssetCache = require('./asset-cache')
 const writeApiGen = require('./write-api')
 const format = require('./format')
 const schema = require('./schema')
-const pkg = require('../package.json')
 
-const configDefaults = {
-  broadcast: true,
-  debug: false,
-  sign: true
-}
+const token = require('./schema/eosio.token.abi.json')
+const system = require('./schema/eosio.system.abi.json')
+const eosio_null = require('./schema/eosio.null.abi.json')
 
-const Eos = (config = {}) => createEos(
-  Object.assign(
-    {},
-    {
-      apiLog: consoleObjCallbackLog(config.verbose),
-      transactionLog: consoleObjCallbackLog(config.verbose),
+const Eos = (config = {}) => {
+  const configDefaults = {
+    httpEndpoint: 'http://127.0.0.1:8888',
+    debug: false,
+    verbose: false,
+    broadcast: true,
+    logger: {
+      log: (...args) => config.verbose ? console.log(...args) : null,
+      error: (...args) => config.verbose ? console.error(...args) : null
     },
-    configDefaults,
-    config
-  )
-)
+    sign: true
+  }
+
+  function applyDefaults(target, defaults) {
+    Object.keys(defaults).forEach(key => {
+      if(target[key] === undefined) {
+        target[key] = defaults[key]
+      }
+    })
+  }
+
+  applyDefaults(config, configDefaults)
+  applyDefaults(config.logger, configDefaults.logger)
+  return createEos(config)
+}
 
 module.exports = Eos
 
 Object.assign(
   Eos,
   {
-    version: pkg.version,
+    version: '16.0.0',
     modules: {
       format,
       api: EosApi,
@@ -68,19 +70,23 @@ Object.assign(
   }
 )
 
-
 function createEos(config) {
-  const network = EosApi(config)
+  const network = config.httpEndpoint != null ? EosApi(config) : null
   config.network = network
 
-  config.assetCache = AssetCache(network)
-  config.abiCache = AbiCache(network, config)
+  const abis = []
+  const abiCache = AbiCache(network, config)
+  abis.push(abiCache.abi('eosio.null', eosio_null))
+  abis.push(abiCache.abi('eosio.token', token))
+  abis.push(abiCache.abi('eosio', system))
 
   if(!config.chainId) {
     config.chainId = 'cf057bbfb72640471fd910bcb67639c22df9f92470936cddc1ade0e2f2e7dc4f'
   }
 
-  checkChainId(network, config.chainId)
+  if(network) {
+    checkChainId(network, config.chainId, config.logger)
+  }
 
   if(config.mockTransactions != null) {
     if(typeof config.mockTransactions === 'string') {
@@ -89,16 +95,23 @@ function createEos(config) {
     }
     assert.equal(typeof config.mockTransactions, 'function', 'config.mockTransactions')
   }
-
   const {structs, types, fromBuffer, toBuffer} = Structs(config)
-  const eos = mergeWriteFunctions(config, EosApi, structs)
+  const eos = mergeWriteFunctions(config, EosApi, structs, abis)
 
-  Object.assign(eos, {fc: {
-    structs,
-    types,
-    fromBuffer,
-    toBuffer
-  }})
+  Object.assign(eos, {
+    config: safeConfig(config),
+    fc: {
+      structs,
+      types,
+      fromBuffer,
+      toBuffer,
+      abiCache
+    },
+    // Repeat of static Eos.modules, help apps that use dependency injection
+    modules: {
+      format
+    }
+  })
 
   if(!config.signProvider) {
     config.signProvider = defaultSignProvider(eos, config)
@@ -107,20 +120,36 @@ function createEos(config) {
   return eos
 }
 
-function consoleObjCallbackLog(verbose = false) {
-  return (error, result, name) => {
-    if(error) {
-      if(name) {
-        console.error(name, 'error')
+/**
+  Set each property as read-only, read-write, no-access.  This is shallow
+  in that it applies only to the root object and does not limit access
+  to properties under a given object.
+*/
+function safeConfig(config) {
+  // access control is shallow references only
+  const readOnly = new Set(['httpEndpoint', 'abiCache', 'chainId', 'expireInSeconds'])
+  const readWrite = new Set(['verbose', 'debug', 'broadcast', 'logger', 'sign'])
+  const protectedConfig = {}
+
+  Object.keys(config).forEach(key => {
+    Object.defineProperty(protectedConfig, key, {
+      set: function(value) {
+        if(readWrite.has(key)) {
+          config[key] = value
+          return
+        }
+        throw new Error('Access denied')
+      },
+
+      get: function() {
+        if(readOnly.has(key) || readWrite.has(key)) {
+          return config[key]
+        }
+        throw new Error('Access denied')
       }
-      console.error(error);
-    } else if(verbose) {
-      if(name) {
-        console.log(name, 'reply:')
-      }
-      console.log(JSON.stringify(result, null, 4))
-    }
-  }
+    })
+  })
+  return protectedConfig
 }
 
 /**
@@ -132,13 +161,12 @@ function consoleObjCallbackLog(verbose = false) {
   @return {object} - read and write method calls (create and sign transactions)
   @throw {TypeError} if a funciton name conflicts
 */
-function mergeWriteFunctions(config, EosApi, structs) {
-  assert(config.network, 'network instance required')
+function mergeWriteFunctions(config, EosApi, structs, abis) {
   const {network} = config
 
   const merge = Object.assign({}, network)
 
-  const writeApi = writeApiGen(EosApi, network, structs, config, schema)
+  const writeApi = writeApiGen(EosApi, network, structs, config, abis)
   throwOnDuplicate(merge, writeApi, 'Conflicting methods in EosApi and Transaction Api')
   Object.assign(merge, writeApi)
 
@@ -161,11 +189,14 @@ function throwOnDuplicate(o1, o2, msg) {
   If only one key is available, the blockchain API calls are skipped and that
   key is used to sign the transaction.
 */
-const defaultSignProvider = (eos, config) => async function({sign, buf, transaction}) {
-  const {keyProvider} = config
+const defaultSignProvider = (eos, config) => async function({
+  sign, buf, transaction, optionsKeyProvider
+}) {
+  // optionsKeyProvider is a per-action key: await eos.someAction('user2' .., {keyProvider: privateKey2})
+  const keyProvider = optionsKeyProvider ? optionsKeyProvider : config.keyProvider
 
   if(!keyProvider) {
-    throw new TypeError('This transaction requires a config.keyProvider for signing')
+    throw new TypeError('This transaction requires a keyProvider for signing')
   }
 
   let keys = keyProvider
@@ -199,6 +230,15 @@ const defaultSignProvider = (eos, config) => async function({sign, buf, transact
   if(keys.length === 1 && keys[0].private) {
     const pvt = keys[0].private
     return sign(buf, pvt)
+  }
+
+  // offline signing assumes all keys provided need to sign
+  if(config.httpEndpoint == null) {
+    const sigs = []
+    for(const key of keys) {
+      sigs.push(sign(buf, key.private))
+    }
+    return sigs
   }
 
   const keyMap = new Map()
@@ -254,15 +294,19 @@ const defaultSignProvider = (eos, config) => async function({sign, buf, transact
   })
 }
 
-function checkChainId(network, chainId) {
+function checkChainId(network, chainId, logger) {
   network.getInfo({}).then(info => {
     if(info.chain_id !== chainId) {
-      console.warn(
-        'WARN: chainId mismatch, signatures will not match transaction authority. ' +
-        `expected ${chainId} !== actual ${info.chain_id}`
-      )
+      if(logger.log) {
+        logger.log(
+          'chainId mismatch, signatures will not match transaction authority. ' +
+          `expected ${chainId} !== actual ${info.chain_id}`
+        )
+      }
     }
   }).catch(error => {
-    console.error(error)
+    if(logger.error) {
+      logger.error('Warning, unable to validate chainId: ' + error.message)
+    }
   })
 }

@@ -10,3 +10,4 @@ dist/*.js
 bin/eosio.system.abi
 bin/eosio.token.abi
 docs/index.md
+dev

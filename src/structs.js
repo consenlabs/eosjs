@@ -3,37 +3,36 @@ const Fcbuffer = require('fcbuffer')
 const ByteBuffer = require('bytebuffer')
 const assert = require('assert')
 
-const json = {schema: require('./schema')}
+const schema = require('./schema')
 
 const {
   isName, encodeName, decodeName,
-  UDecimalPad, UDecimalImply, UDecimalUnimply,
-  parseExtendedAsset
+  DecimalPad, DecimalImply, DecimalUnimply,
+  printAsset, parseAsset
 } = require('./format')
 
 /** Configures Fcbuffer for EOS specific structs and types. */
 module.exports = (config = {}, extendedSchema) => {
   const structLookup = (lookupName, account) => {
-    const cachedCode = new Set(['eosio', 'eosio.token'])
-    if(cachedCode.has(account)) {
-      return structs[lookupName]
-    }
-    const abi = config.abiCache.abi(account)
-    const struct = abi.structs[lookupName]
-    if(struct != null) {
-      return struct
-    }
-    // TODO: move up (before `const struct = abi.structs[lookupName]`)
-    for(const action of abi.abi.actions) {
-      const {name, type} = action
-      if(name === lookupName) {
-        const struct = abi.structs[type]
+    const cache = config.abiCache.abi(account)
+
+    // Lookup by ABI action "name"
+    for(const action of cache.abi.actions) {
+      if(action.name === lookupName) {
+        const struct = cache.structs[action.type]
         if(struct != null) {
           return struct
         }
       }
     }
-    throw new Error(`Missing ABI struct or action: ${lookupName}`)
+
+    // Lookup struct by "type"
+    const struct = cache.structs[lookupName]
+    if(struct != null) {
+      return struct
+    }
+
+    throw new Error(`Missing ABI action: ${lookupName}`)
   }
 
   // If nodeos does not have an ABI setup for a certain action.type, it will throw
@@ -43,24 +42,23 @@ module.exports = (config = {}, extendedSchema) => {
     config.forceActionDataHex : true
 
   const override = Object.assign({},
-    authorityOverride,
+    authorityOverride(config),
     abiOverride(structLookup),
     wasmCodeOverride(config),
     actionDataOverride(structLookup, forceActionDataHex),
     config.override
   )
 
-  const {assetCache} = config
-
   const eosTypes = {
     name: ()=> [Name],
     public_key: () => [variant(PublicKeyEcc)],
 
-    symbol: () => [Symbol(assetCache)],
-    extended_symbol: () => [ExtendedSymbol(assetCache)],
+    symbol: () => [Symbol],
+    symbol_code: () => [SymbolCode],
+    extended_symbol: () => [ExtendedSymbol],
 
-    asset: () => [Asset(assetCache)], // After Symbol: amount, precision, symbol, contract
-    extended_asset: () => [ExtendedAsset(assetCache)], // After Asset: amount, precision, symbol, contract
+    asset: () => [Asset], // After Symbol: amount, precision, symbol, contract
+    extended_asset: () => [ExtendedAsset], // After Asset: amount, precision, symbol, contract
 
     signature: () => [variant(SignatureType)]
   }
@@ -75,9 +73,9 @@ module.exports = (config = {}, extendedSchema) => {
   config.sort['authority.accounts'] = true
   config.sort['authority.keys'] = true
 
-  const schema = Object.assign({}, json.schema, extendedSchema)
+  const fullSchema = Object.assign({}, schema, extendedSchema)
+  const {structs, types, errors, fromBuffer, toBuffer} = Fcbuffer(fullSchema, config)
 
-  const {structs, types, errors, fromBuffer, toBuffer} = Fcbuffer(schema, config)
   if(errors.length !== 0) {
     throw new Error(JSON.stringify(errors, null, 4))
   }
@@ -159,14 +157,14 @@ const PublicKeyEcc = (validation) => {
       const bcopy = b.copy(b.offset, b.offset + 33)
       b.skip(33)
       const pubbuf = Buffer.from(bcopy.toBinary(), 'binary')
-      return PublicKey.fromBuffer(pubbuf).toString()
+      return PublicKey.fromBuffer(pubbuf).toString(validation.keyPrefix)
     },
 
     appendByteBuffer (b, value) {
       // if(validation.debug) {
       //   console.error(`${value}`, 'PublicKeyType.appendByteBuffer')
       // }
-      const buf = PublicKey.fromStringOrThrow(value).toBuffer()
+      const buf = PublicKey.fromStringOrThrow(value, validation.keyPrefix).toBuffer()
       b.append(buf.toString('binary'), 'binary')
     },
 
@@ -176,65 +174,20 @@ const PublicKeyEcc = (validation) => {
 
     toObject (value) {
       if (validation.defaults && value == null) {
-        return 'EOS6MRy..'
+        const keyPrefix = validation.keyPrefix ? validation.keyPrefix : 'EOS'
+        return keyPrefix + '6MRy..'
       }
       return value
     }
   }
 }
 
-/** @private */
-function precisionCache(assetCache, value) {
-  const symbolInfo = parseExtendedAsset(value)
-  const contract = symbolInfo.contract || 'eosio.token'
-
-  let precision
-
-  if(contract) {
-    const asset = assetCache.lookup(symbolInfo.symbol, contract)
-
-    if(asset != null) {
-      if(symbolInfo.precision != null) {
-        assert.equal(asset.precision, symbolInfo.precision,
-          `Precision mismatch for asset: ${value}`)
-      }
-      precision = asset.precision
-
-    } else {
-      // Lookup for later (appendByteBuffer)
-      assetCache.lookupAsync(symbolInfo.symbol, contract)
-
-      // asset === null is a confirmation that the asset did not exist on the blockchain
-      if(asset === null) {
-        if(symbolInfo.precision == null && symbolInfo.amount != null) {
-          // no blockchain asset, no explicit precision .. derive from amount
-          const [, decimalstr = ''] = symbolInfo.amount.split('.')
-          precision = decimalstr.length
-          // console.log('derivied precision for new asset: ' + precision + ',' + symbolInfo.symbol)
-        }
-      }
-    }
-  }
-
-  if(precision == null) {
-    precision = symbolInfo.precision
-  }
-
-  const pc = Object.assign({}, symbolInfo, {contract})
-  if(precision != null) {
-    pc.precision = precision
-  }
-  // console.log('precisionCache', pc)
-  return pc
-}
-
-
 /**
   Internal: precision, symbol
   External: symbol
   @example 'SYS'
 */
-const Symbol = assetCache => validation => {
+const Symbol = validation => {
   return {
     fromByteBuffer (b) {
       const bcopy = b.copy(b.offset, b.offset + 8)
@@ -250,20 +203,19 @@ const Symbol = assetCache => validation => {
         }
         symbol += code
       }
-      precisionCache(assetCache, `${precision},${symbol}`) // validate
       return `${precision},${symbol}`
     },
 
     appendByteBuffer (b, value) {
-      const {symbol, precision} = precisionCache(assetCache, value)
-      assert(precision != null, `Precision unknown for asset: ${value}`)
+      const {symbol, precision} = parseAsset(value)
+      assert(precision != null, `Precision unknown for symbol: ${value}`)
       const pad = '\0'.repeat(7 - symbol.length)
       b.append(String.fromCharCode(precision) + symbol + pad)
     },
 
     fromObject (value) {
       assert(value != null, `Symbol is required: ` + value)
-      const {symbol, precision} = precisionCache(assetCache, value)
+      const {symbol, precision} = parseAsset(value)
       if(precision == null) {
         return symbol
       } else {
@@ -277,7 +229,47 @@ const Symbol = assetCache => validation => {
         return 'SYS'
       }
       // symbol only (without precision prefix)
-      return precisionCache(assetCache, value).symbol
+      return parseAsset(value).symbol
+    }
+  }
+}
+
+/** Symbol type without the precision */
+const SymbolCode = validation => {
+  return {
+    fromByteBuffer (b) {
+      const bcopy = b.copy(b.offset, b.offset + 8)
+      b.skip(8)
+
+      const bin = bcopy.toBinary()
+
+      let symbol = ''
+      for(const code of bin)  {
+        if(code == '\0') {
+          break
+        }
+        symbol += code
+      }
+      return `${symbol}`
+    },
+
+    appendByteBuffer (b, value) {
+      const {symbol} = parseAsset(value)
+      const pad = '\0'.repeat(8 - symbol.length)
+      b.append(symbol + pad)
+    },
+
+    fromObject (value) {
+      assert(value != null, `Symbol is required: ` + value)
+      const {symbol} = parseAsset(value)
+      return symbol
+    },
+
+    toObject (value) {
+      if (validation.defaults && value == null) {
+        return 'SYS'
+      }
+      return parseAsset(value).symbol
     }
   }
 }
@@ -287,7 +279,7 @@ const Symbol = assetCache => validation => {
   External: symbol, contract
   @example 'SYS@contract'
 */
-const ExtendedSymbol = assetCache => (validation, baseTypes, customTypes) => {
+const ExtendedSymbol = (validation, baseTypes, customTypes) => {
   const symbolType = customTypes.symbol(validation)
   const contractName = customTypes.name(validation)
 
@@ -314,78 +306,64 @@ const ExtendedSymbol = assetCache => (validation, baseTypes, customTypes) => {
 
     toObject (value) {
       if (validation.defaults && value == null) {
-        return '4,SYS@contract'
+        return 'SYS@contract'
       }
       return value
     }
   }
 }
 
-function toAssetString(value, assetCache, format = '') {
-  assert.equal(typeof value, 'string', `expecting asset string, got ` + (typeof value))
-
-  const {precision, symbol, amount, contract} = precisionCache(assetCache, value)
-
-  if(format === 'plain_asset') {
-    return `${UDecimalPad(amount, precision)} ${symbol}`
-  }
-
-  if(format === 'extended_asset') {
-    const contractSuffix = contract ? `@${contract}` : ''
-    return `${UDecimalPad(amount, precision)} ${symbol}${contractSuffix}`
-  }
-
-  if(format === 'full_asset') {
-    const precisionPrefix = precision != null ? `${precision},` : ''
-    const full = `${UDecimalPad(amount, precision)} ${precisionPrefix}${symbol}`
-    // console.log('full_asset', full)
-    return full
-  }
-
-  if(format === 'full_extended_asset') {
-    const contractSuffix = contract ? `@${contract}` : ''
-    const precisionPrefix = precision != null ? `${precision},` : ''
-    const full = `${UDecimalPad(amount, precision)} ${precisionPrefix}${symbol}${contractSuffix}`
-    // console.log('full_extended_asset', full)
-    return full
-  }
-
-  assert(false, 'format should be: plain, extended, or full')
-}
-
 /**
   Internal: amount, precision, symbol, contract
   @example '1.0000 SYS'
 */
-const Asset = assetCache => (validation, baseTypes, customTypes) => {
+const Asset = (validation, baseTypes, customTypes) => {
   const amountType = baseTypes.int64(validation)
   const symbolType = customTypes.symbol(validation)
 
   return {
     fromByteBuffer (b) {
       const amount = amountType.fromByteBuffer(b)
+      assert(amount != null, 'amount')
+
       const sym = symbolType.fromByteBuffer(b)
-      const {precision, symbol} = precisionCache(assetCache, sym)
-      return toAssetString(`${UDecimalUnimply(amount, precision)} ${precision},${symbol}`, assetCache, 'full_asset')
+      const {precision, symbol} = parseAsset(`${sym}`)
+      assert(precision != null, 'precision')
+      assert(symbol != null, 'symbol')
+
+      return `${DecimalUnimply(amount, precision)} ${symbol}`
     },
 
     appendByteBuffer (b, value) {
-      assert.equal(typeof value, 'string', `expecting asset string, got ` + (typeof value))
-      const {amount, precision, symbol} = precisionCache(assetCache, value)
-      assert(precision != null, `Precision unknown for asset: ${value}`)
-      amountType.appendByteBuffer(b, UDecimalImply(amount, precision))
-      symbolType.appendByteBuffer(b, value)
+      const {amount, precision, symbol} = parseAsset(value)
+      assert(amount != null, 'amount')
+      assert(precision != null, 'precision')
+      assert(symbol != null, 'symbol')
+
+      amountType.appendByteBuffer(b, DecimalImply(amount, precision))
+      symbolType.appendByteBuffer(b, `${precision},${symbol}`)
     },
 
     fromObject (value) {
-      return toAssetString(value, assetCache, 'full_asset')
+      const {amount, precision, symbol} = parseAsset(value)
+      assert(amount != null, 'amount')
+      assert(precision != null, 'precision')
+      assert(symbol != null, 'symbol')
+
+      return `${DecimalPad(amount, precision)} ${symbol}`
     },
 
     toObject (value) {
       if (validation.defaults && value == null) {
         return '0.0001 SYS'
       }
-      return toAssetString(value, assetCache, 'plain_asset')
+
+      const {amount, precision, symbol} = parseAsset(value)
+      assert(amount != null, 'amount')
+      assert(precision != null, 'precision')
+      assert(symbol != null, 'symbol')
+
+      return `${DecimalPad(amount, precision)} ${symbol}`
     }
   }
 }
@@ -393,7 +371,7 @@ const Asset = assetCache => (validation, baseTypes, customTypes) => {
 /**
   @example '1.0000 SYS@contract'
 */
-const ExtendedAsset = assetCache => (validation, baseTypes, customTypes) => {
+const ExtendedAsset = (validation, baseTypes, customTypes) => {
   const assetType = customTypes.asset(validation)
   const contractName = customTypes.name(validation)
 
@@ -401,31 +379,61 @@ const ExtendedAsset = assetCache => (validation, baseTypes, customTypes) => {
     fromByteBuffer (b) {
       const asset = assetType.fromByteBuffer(b)
       const contract = contractName.fromByteBuffer(b)
-      return `${asset}@${contract}`
+      return parseAsset(`${asset}@${contract}`)
     },
 
     appendByteBuffer (b, value) {
-      assert.equal(typeof value, 'string', 'Invalid extended asset: ' + value)
+      assert.equal(typeof value, 'object', 'expecting extended_asset object, got ' + typeof value)
 
-      const [asset, contract] = value.split('@')
+      const asset = printAsset(value)
+
+      const [, contract] = asset.split('@')
       assert.equal(typeof contract, 'string', 'Invalid extended asset: ' + value)
 
+      // asset includes contract (assetType needs this)
       assetType.appendByteBuffer(b, asset)
       contractName.appendByteBuffer(b, contract)
     },
 
     fromObject (value) {
       // like: 1.0000 SYS@contract or 1 SYS@contract
-      assert(/^\d+(\.\d+)* [A-Z]+@[a-z0-5]+(\.[a-z0-5]+)*$/.test(value),
-        'Invalid extended asset: ' + value)
-      return toAssetString(value, assetCache, 'full_extended_asset')
+      const asset = {}
+      if(typeof value === 'string') {
+        Object.assign(asset, parseAsset(value))
+      } else if (typeof value === 'object') {
+        Object.assign(asset, value)
+      } else {
+        assert(false, 'expecting extended_asset<object|string>, got: ' + typeof value)
+      }
+
+      const {amount, precision, symbol, contract} = asset
+      assert(amount != null, 'missing amount')
+      assert(precision != null, 'missing precision')
+      assert(symbol != null, 'missing symbol')
+      assert(contract != null, 'missing contract')
+
+      return {amount, precision, symbol, contract}
     },
 
     toObject (value) {
       if (validation.defaults && value == null) {
-        return '1.0000 SYS@eosio.token'
+        return {
+          amount: '1.0000',
+          precision: 4,
+          symbol: 'SYS',
+          contract: 'eosio.token'
+        }
       }
-      return toAssetString(value, assetCache, 'extended_asset')
+
+      assert.equal(typeof value, 'object', 'expecting extended_asset object')
+      const {amount, precision, symbol, contract} = value
+
+      return {
+        amount: DecimalPad(amount, precision),
+        precision,
+        symbol,
+        contract
+      }
     }
   }
 }
@@ -459,10 +467,10 @@ const SignatureType = (validation, baseTypes) => {
   }
 }
 
-const authorityOverride = ({
+const authorityOverride = config => ({
   /** shorthand `EOS6MRyAj..` */
   'authority.fromObject': (value) => {
-    if(PublicKey.fromString(value)) {
+    if(PublicKey.fromString(value, config.keyPrefix)) {
       return {
         threshold: 1,
         keys: [{key: value, weight: 1}]
@@ -485,18 +493,30 @@ const authorityOverride = ({
 })
 
 const abiOverride = structLookup => ({
-  'abi.fromObject': (value) => {
+  'abi_def.fromObject': (value) => {
     if(typeof value === 'string') {
-      return JSON.parse(value)
+      let json = Buffer.from(value, 'hex').toString()
+      if(json.length === 0) {
+        json = Buffer.from(value).toString()
+      }
+      return JSON.parse(json)
     }
     if(Buffer.isBuffer(value)) {
       return JSON.parse(value.toString())
     }
+    return null // let the default type take care of it
   },
+
   'setabi.abi.appendByteBuffer': ({fields, object, b}) => {
     const ser = structLookup('abi_def', 'eosio')
     const b2 = new ByteBuffer(ByteBuffer.DEFAULT_CAPACITY, ByteBuffer.LITTLE_ENDIAN)
-    ser.appendByteBuffer(b2, object.abi)
+
+    if(Buffer.isBuffer(object.abi)) {
+      b2.append(object.abi)
+    } else if(typeof object.abi == 'object'){
+      ser.appendByteBuffer(b2, object.abi)
+    }
+
     b.writeVarint32(b2.offset) // length prefix
     b.append(b2.copy(0, b2.offset), 'binary')
   }
@@ -551,7 +571,7 @@ const actionDataOverride = (structLookup, forceActionDataHex) => ({
       b.append(b2.copy(0, b2.offset), 'binary')
     } else {
       // console.log(`Unknown Action.name ${object.name}`)
-      const data = typeof object.data === 'string' ? new Buffer(object.data, 'hex') : object.data
+      const data = typeof object.data === 'string' ? Buffer.from(object.data, 'hex') : object.data
       if(!Buffer.isBuffer(data)) {
         throw new TypeError(`Unknown struct '${object.name}' for contract '${object.account}', locate this struct or provide serialized action.data`)
       }
@@ -567,7 +587,7 @@ const actionDataOverride = (structLookup, forceActionDataHex) => ({
       if(typeof data === 'object') {
         result.data = ser.fromObject(data) // resolve shorthand
       } else if(typeof data === 'string') {
-        const buf = new Buffer(data, 'hex')
+        const buf = Buffer.from(data, 'hex')
         result.data = Fcbuffer.fromBuffer(ser, buf)
       } else {
         throw new TypeError('Expecting hex string or object in action.data')

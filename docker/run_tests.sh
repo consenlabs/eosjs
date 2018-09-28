@@ -18,4 +18,10 @@ docker cp docker_nodeosd_1:/contracts .
 
 cd ..
 npm install
-NODE_ENV=development npm run test
+npm run test
+
+npm run build
+npm run minimize
+
+echo "Subresource Integrity"
+npm run srisum

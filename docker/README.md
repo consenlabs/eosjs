@@ -16,6 +16,8 @@ docker-compose down
 . ./dockrc.sh
 ```
 
+The [EOSIO developer docs](https://developers.eos.io/eosio-nodeos/docs/docker-quickstart) uses a `cleos` alias too.  If you see “No such container: eosio”, run ‘unalias cleos’ and try again.
+
 # Unit Test
 
 Run all unit test in a temporary instance.  Note, this script will run
